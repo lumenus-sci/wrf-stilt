@@ -3,12 +3,12 @@
 # 
 # purpose: samples wrfout files to pull out boundary conditions for STILT trajectories
 # author: Sean Crowell
-# date: Sept 19, 2024
 # input: boundary point HDF file from compile_boundary_points.py script
 # output: boundary point HDF file augmented with wrfout samples
 #
-# V0: works with Xiao-Ming Hu's files (moved to old_samplers)
+# V0: works with Xiao-Ming Hu's files (moved to old_samplers) - 9/19/2024
 # V1: works with wrfout files in a single directory
+# V2: added parallel functionality with concurrent.futures - 10/2/2024
 #========================
 
 from h5py import File
@@ -18,6 +18,15 @@ import numpy as np
 import datetime as dt
 import scipy
 from pykdtree.kdtree import KDTree
+
+def create_halo_file_list(domain='d01',altitude=50):
+    flts = ['20230726_F1','20230726_F2','20230728_F1','20230728_F2','20230805_F1','20230809_F1']
+    args_list = []
+    for flt in flts:
+        flt_files = glob.glob(f'/scratch/07351/tg866507/halo/bnd/bnd_loc/{flt}/*_{altitude}_*_bnd.h5')
+        for fi in flt_files:
+            args_list.append({'domain':domain,'filename':fi})
+    return args_list
 
 def sample_wrfout_single_receptor(domain='d01',filename=''):
     with File(filename,'r') as loc_f:
@@ -101,7 +110,7 @@ def sample_wrfout_single_receptor(domain='d01',filename=''):
         loc_f.create_dataset('wrf_ch4',data=bc_ch4[:])
         loc_f.close()
 
-def run_functions_in_parallel(args_list):
+def run_sampler_in_parallel(args_list):
     with concurrent.futures.ThreadPoolExecutor() as executor:
         # Submit tasks to be executed in parallel with named arguments
         future_to_args = {executor.submit(sample_wrfout_single_receptor, **args): args for args in args_list}
@@ -118,12 +127,7 @@ def run_functions_in_parallel(args_list):
 if __name__ == "__main__":
     domain = sys.argv[1]
     altitude = sys.argv[2]
-    flts = ['20230726_F1','20230726_F2','20230728_F1','20230728_F2','20230805_F1','20230809_F1']
-    args_list = []
-    for flt in flts:
-        flt_files = glob.glob(f'bnd_loc/{flt}/*_{altitude}_*_bnd.h5')
-        for fi in flt_files:
-            args_list.append({'domain':domain,'filename':fi})
+    args_list = create_halo_file_list(domain=domain,altitude=altitude)
     start_time = time.time()
-    run_functions_in_parallel(args_list)
+    run_sampler_in_parallel(args_list)
     print(f'Execution Time: {time.time()-start_time} seconds')
