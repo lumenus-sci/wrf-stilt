@@ -1,14 +1,37 @@
 #========================
-# sample_wrfout.py
-# 
-# purpose: samples wrfout files to pull out boundary conditions for STILT trajectories
-# author: Sean Crowell
-# input: boundary point HDF file from compile_boundary_points.py script
-# output: boundary point HDF file augmented with wrfout samples
+# wrf-stilt-utils.py 
 #
-# V0: works with Xiao-Ming Hu's files (moved to old_samplers) - 9/19/2024
-# V1: works with wrfout files in a single directory
-# V2: added parallel functionality with concurrent.futures - 10/2/2024
+# Changelog:
+# 10/03/2024 V0: Initial Commit - Sean Crowell
+#
+# Contains:
+# 
+# sample_wrfout_single_receptor(wrf_domain='',boundary_filename='')
+#    Description:       Finds the wrfout file with the location/time of a particle and 
+#                       extracts its CO2 and CH4 at the nearest model level with KDTree
+#    Inputs:
+#    wrf_domain:        wrfout domain - "d01"
+#    boundary_filename: the boundary point file name - contains the location and time
+#                       where each particle hit the boundary
+#    
+# locate_trajectory_boundary_points(traj_fname='',save_dir='',bbox=[],write_files=False)
+#    Description:       Locates the location/time where the particle trajectory first
+#                       leaves a predefined lat/lon rectangular box and writes it to a 
+#                       file.
+#    Inputs:
+#    traj_fname:        Particle trajectory .rds filename
+#    save_dir:          Where to save the boundary point file
+#    bbox:              list of four values: [lon_lb,lon_ub,lat_lb,lat_ub]
+#
+# run_function_in_parallel(fun,args_list)
+#    Description:       Generic function that runs any function over a set of CPUs -
+#                       note that this uses concurrent.futures.PoolProcessExecutor due
+#                       to multithreading issues with rpy2
+#    Inputs:
+#    fun:               Python function
+#    args_list:         List of dictionaries with keys set to match the input variable
+#                       argument names for the function fun
+#
 #========================
 
 from h5py import File
@@ -18,29 +41,23 @@ import numpy as np
 import datetime as dt
 import scipy
 from pykdtree.kdtree import KDTree
+import rpy2.robjects as ro
+from rpy2.robjects import conversion,default_converter
 
-def create_halo_file_list(domain='d01',altitude=50):
-    flts = ['20230726_F1','20230726_F2','20230728_F1','20230728_F2','20230805_F1','20230809_F1']
-    args_list = []
-    for flt in flts:
-        flt_files = glob.glob(f'/scratch/07351/tg866507/halo/bnd/bnd_loc/{flt}/*_{altitude}_*_bnd.h5')
-        for fi in flt_files:
-            args_list.append({'domain':domain,'filename':fi})
-    return args_list
-
-def sample_wrfout_single_receptor(domain='d01',filename=''):
-    with File(filename,'r') as loc_f:
+def sample_wrfout_single_receptor(wrf_domain='d01',boundary_filename=''):
+    
+    with File(boundary_filename,'r') as loc_f:
         alt = loc_f['particle_altitude'][:]
         lon = loc_f['particle_longitude'][:]
         lat = loc_f['particle_latitude'][:]
         t = loc_f['particle_time'][:]
         obs_t = (dt.datetime.strptime(loc_f.attrs['obs_time'][:],'%Y-%m-%d %H:%M:%S UTC')-dt.datetime(1970,1,1)).total_seconds()
         loc_f.close()
+
     #==================================================
     wrfout_prefix = '/work2/07655/tg869546/stampede3/nyc-chem/2023/wrfout/'
     part_t = np.array([dt.datetime(1970,1,1) + dt.timedelta(seconds=ti) for ti in t])
-    # find all of the files in Xiao-Ming's directory that match up with the trajectories 
-    wrf_files = np.array([wrfout_prefix+'/wrfout_'+domain+f'_{part_t[ip].strftime('%Y-%m-%d_%H')}:00:00' for ip in range(len(part_t))])
+    wrf_files = np.array([f"{wrfout_prefix}/wrfout_{wrf_domain}_{part_t[ip].strftime('%Y-%m-%d_%H')}:00:00" for ip in range(len(part_t))])
     # Only loop over the unique filenames to save I/O
     unique_wrf_files = sorted(np.array(list(set(wrf_files))))
     #===================================================
@@ -95,7 +112,7 @@ def sample_wrfout_single_receptor(domain='d01',filename=''):
             ch4 += f['CH4_'+ch4_v][0][z_inds,lat_inds,lon_inds]-f['CH4_BCK'][0][z_inds,lat_inds,lon_inds]
         ch4 += f['CH4_BCK'][0][z_inds,lat_inds,lon_inds]
         bc_ch4[part_inds] = ch4[:]
-    wrf_bnd_fname = filename.split('.h5')[0]+'_wrf'+domain+'.h5'
+    wrf_bnd_fname = filename.split('.h5')[0]+'_wrf'+wrf_domain+'.h5'
     if os.path.exists(wrf_bnd_fname): os.remove(wrf_bnd_fname)
     with File(wrf_bnd_fname,'w') as loc_f:
         loc_f.create_dataset('part_lat',data=lat[:])
@@ -110,24 +127,89 @@ def sample_wrfout_single_receptor(domain='d01',filename=''):
         loc_f.create_dataset('wrf_ch4',data=bc_ch4[:])
         loc_f.close()
 
-def run_sampler_in_parallel(args_list):
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+def locate_trajectory_boundary_points(traj_fname='',save_dir='',bbox=[],write_files=False):
+
+    save_fname = save_dir+traj_fname.split('/')[-1].split('.rds')[0]+'_bnd.h5'
+    lon_lb,lon_ub,lat_lb,lat_ub = bbox[:]#args_dict['bounding_box']
+
+    with conversion.localconverter(default_converter):
+#Trajectories are saved as RDS File
+        readRDS = ro.r['readRDS']
+        rdf = readRDS(traj_fname)
+#----
+# Particle information
+        part = {}
+# t = time in seconds since release (from minutes in RDF file)
+        part['t'] = np.array(rdf[2][0])*60
+# ind = particle ID
+        part['ind'] = np.array(rdf[2][1])
+# lat/lon/zagl = physical location of particle at a given time step
+        part['lat'] = np.array(rdf[2][3])
+        part['lon'] = np.array(rdf[2][2])
+        part['zagl'] = np.array(rdf[2][4])
+        n_traj = int(part['ind'].max())
+#----
+
+#----
+# Find boundary intersection
+    bnd_inds = []
+    for i in range(1,n_traj+1):
+        pt_inds = np.where(part['ind'] == i)[0]
+        bind = np.where((part['lon'][pt_inds] >= lon_lb)*(part['lon'][pt_inds] <= lon_ub)*(part['lat'][pt_inds] <= lat_ub)*(part['lat'][pt_inds] >= lat_lb))[0]
+        if len(np.where(np.diff(bind) > 1)[0]) == 0:
+            bd = bind[-1]
+        else:
+            bd = bind[np.where(np.diff(bind) > 1)][0]
+        bnd_inds.append(bd)
+
+    rec = {}
+    for ky in ['lat','lon','zagl','ind','t']:
+        rec[ky] = np.nan*np.zeros((n_traj,max(bnd_inds)+1))
+
+    rec['last_ind'] = []
+    for i in range(n_traj):
+        pt_inds = np.where (part['ind'] == i+1)[0]
+        for ky in ['lat','lon','zagl','ind','t']:
+            if len(part[ky]) == 0: continue
+            rec[ky][i,:bnd_inds[i]] = part[ky][pt_inds][:bnd_inds[i]]
+        rec['last_ind'].append(bnd_inds[i])
+#----
+
+#----
+# Write out boundary points - take the mean of the last 5 points to reduce noise
+    inds = rec['last_ind'][:]
+    bnd = {}
+    bnd['x'] = np.array([rec['lon'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
+    bnd['y'] = np.array([rec['lat'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
+    bnd['z'] = np.array([rec['zagl'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
+    bnd['t'] = np.array([rec['t'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)]) #time in seconds since release
+    bnd['obs_t'] = rdf[1][0][0] #(dt.datetime(1970,1,1) + dt.timedelta(seconds=rdf[1][0][0])).strftime('%Y-%    m-%d %H:%M:%S UTC')
+    bnd['part_t'] = bnd['obs_t'] + bnd['t'] # Seconds since 1970,1,1
+
+    if write_files: 
+        f_out = File('bnd/'+bnd_fname,'w')
+        f_out.attrs['obs_time'] = (dt.datetime(1970,1,1) + dt.timedelta(seconds=rdf[1][0][0])).strftime('%Y-%m-%d %H:%M:%S UTC')
+        f_out.create_dataset('particle_time',data=bnd['part_t'][:])
+        f_out['particle_time'].attrs['units'] = 'Seconds since 1/1/1970'
+        f_out.create_dataset('particle_latitude',data=bnd['y'][:])
+        f_out.create_dataset('particle_longitude',data=bnd['x'][:])
+        f_out.create_dataset('particle_altitude',data=bnd['z'][:])
+        f_out.close()
+#----
+    return part,bnd
+
+def run_function_in_parallel(fun,args_list):
+    with concurrent.futures.ProcessPoolExecutor() as executor:
         # Submit tasks to be executed in parallel with named arguments
-        future_to_args = {executor.submit(sample_wrfout_single_receptor, **args): args for args in args_list}
+        future_to_args = {executor.submit(fun, **args): args for args in args_list}
 
         # Gather results as they complete
         for future in concurrent.futures.as_completed(future_to_args):
             args = future_to_args[future]
             try:
                 result = future.result()
-                print(f"Function with args {args} finished with result: {result}")
+                print(f"Function with args {args} finished successfully!")
             except Exception as exc:
                 print(f"Function with args {args} generated an exception: {exc}")
 
-if __name__ == "__main__":
-    domain = sys.argv[1]
-    altitude = sys.argv[2]
-    args_list = create_halo_file_list(domain=domain,altitude=altitude)
-    start_time = time.time()
-    run_sampler_in_parallel(args_list)
-    print(f'Execution Time: {time.time()-start_time} seconds')
+
