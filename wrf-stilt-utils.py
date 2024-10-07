@@ -39,13 +39,20 @@ import netCDF4 as nc
 import glob,sys,os,pdb,concurrent.futures,time
 import numpy as np
 import datetime as dt
-import scipy
 from pykdtree.kdtree import KDTree
 import rpy2.robjects as ro
 from rpy2.robjects import conversion,default_converter
 
-def sample_wrfout_single_receptor(wrf_domain='d01',boundary_filename=''):
-    
+def sample_wrfout_single_receptor(wrf_domain='d01',boundary_filename='',overwrite=False):
+
+    wrf_bnd_fname = boundary_filename.split('.h5')[0]+'_wrf'+wrf_domain+'.h5'
+    if os.path.exists(wrf_bnd_fname):
+        if overwrite==True: 
+            os.remove(wrf_bnd_fname)
+        else:
+            print('Boundary GHG file already exists, skipping.')
+            return
+
     with File(boundary_filename,'r') as loc_f:
         alt = loc_f['particle_altitude'][:]
         lon = loc_f['particle_longitude'][:]
@@ -112,8 +119,6 @@ def sample_wrfout_single_receptor(wrf_domain='d01',boundary_filename=''):
             ch4 += f['CH4_'+ch4_v][0][z_inds,lat_inds,lon_inds]-f['CH4_BCK'][0][z_inds,lat_inds,lon_inds]
         ch4 += f['CH4_BCK'][0][z_inds,lat_inds,lon_inds]
         bc_ch4[part_inds] = ch4[:]
-    wrf_bnd_fname = filename.split('.h5')[0]+'_wrf'+wrf_domain+'.h5'
-    if os.path.exists(wrf_bnd_fname): os.remove(wrf_bnd_fname)
     with File(wrf_bnd_fname,'w') as loc_f:
         loc_f.create_dataset('part_lat',data=lat[:])
         loc_f.create_dataset('part_lon',data=lon[:])
