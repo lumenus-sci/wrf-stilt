@@ -39,9 +39,81 @@ import netCDF4 as nc
 import glob,sys,os,pdb,concurrent.futures,time
 import numpy as np
 import datetime as dt
+from scipy.interpolate import interp1d
 from pykdtree.kdtree import KDTree
 import rpy2.robjects as ro
 from rpy2.robjects import conversion,default_converter
+
+def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
+    ''' 
+    This function finds the wrfout files closest in time to a sample and
+    then locates the gridbox closest to the sample location from which it 
+    pulls the variables of interest. 
+    '''
+    files = sorted(glob.glob(f'{wrf_path}/*{wrf_domain}*'))
+    wrfdatetime = [dt.datetime.strptime(fi.split(f'{wrf_domain}_')[-1],'%Y-%m-%d_%H:%M:%S') for fi in files]
+    try:
+        sample_lat = np.array(var_dict['lat'][:])
+        sample_lon = np.array(var_dict['lon'][:])
+        sample_dt = np.array(var_dict['datetime'][:])
+    except KeyError:
+        print("var_dict must contain at least one longitude, latitude, and datetime")
+        return var_dict
+
+    n_samples = len(sample_lat)
+    wrf_files = []
+    for i in range(n_samples):
+        wrf_files.append(f"{wrf_path}/wrfout_{wrf_domain}_{sample_dt[i].strftime('%Y-%m-%d_%H')}:00:00")
+    # Only loop over the unique filenames to save I/O
+    unique_wrf_files = sorted(np.array(list(set(wrf_files))))
+
+    f = nc.Dataset(wrf_files[0],'r')
+    for v in var_dict:
+        if v in ['lat','lon','datetime','levs']: continue
+        if 'levs' in var_dict.keys():
+            interp = True
+            interp_levs = var_dict['levs']
+            n_levs = len(interp_levs)
+        else:
+            interp = False
+            n_levs = f['P'][:].shape[1]
+        var_dict[v] = np.zeros((n_samples,n_levs))
+    for fi in unique_wrf_files:
+        f = nc.Dataset(fi,'r')
+        wrf_lat = f['XLAT'][:][0]
+        wrf_lon = f['XLONG'][:][0]
+        tree = KDTree(np.c_[wrf_lon.ravel(),wrf_lat.ravel()])
+
+        time_inds = np.where([fl == fi for fl in wrf_files])[0]
+        part_lat = sample_lat[time_inds]
+        part_lon = sample_lon[time_inds]
+        part_points = np.float32(np.c_[part_lon,part_lat])
+
+        dd,ii = tree.query(part_points,k=1,eps=0.0)
+        lat_inds,lon_inds = np.unravel_index(ii,wrf_lat.shape,order='C')
+        wrf_gph = (f['PH'][:] + f['PHB'][:])[0][:,lat_inds,lon_inds]
+        wrf_z = wrf_gph/9.8
+
+        for v in var_dict.keys():
+            if v in ['lat','lon','datetime','levs']: continue
+            pdb.set_trace()
+            if v.lower() == 'pressure':
+                vwrf = f['P'][:][0,:,lat_inds,lon_inds] + f['PB'][:][0,:,lat_inds,lon_inds]
+            else:
+                try:
+                    vwrf = f[v][:][0,:,lat_inds,lon_inds]
+                except KeyError:
+                    print(f"{v} not defined")
+                    continue
+            if interp:
+                for i in time_inds:
+                    intpf = interp(wrf_z,vwrf)
+                    var_dict[v][i] = intpf(interp_levs)
+            else:
+                for i in time_inds:
+                    var_dict[v][i] = vwrf[i]
+
+    return var_dict
 
 def sample_wrfout_single_receptor(wrf_domain='d01',boundary_filename='',overwrite=False):
 
