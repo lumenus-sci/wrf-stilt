@@ -71,11 +71,9 @@ def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
     for v in var_dict:
         if v in ['lat','lon','datetime','levs']: continue
         if 'levs' in var_dict.keys():
-            interp = True
             interp_levs = var_dict['levs']
             n_levs = len(interp_levs)
         else:
-            interp = False
             n_levs = f['P'][:].shape[1]
         var_dict[v] = np.zeros((n_samples,n_levs))
     for fi in unique_wrf_files:
@@ -93,25 +91,37 @@ def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
         lat_inds,lon_inds = np.unravel_index(ii,wrf_lat.shape,order='C')
         wrf_gph = (f['PH'][:] + f['PHB'][:])[0][:,lat_inds,lon_inds]
         wrf_z = wrf_gph/9.8
+        wrf_zsurf = f['HGT'][:][0,lat_inds,lon_inds]
 
         for v in var_dict.keys():
+            if 'levs' in var_dict.keys(): vert_interp = True
             if v in ['lat','lon','datetime','levs']: continue
-            pdb.set_trace()
             if v.lower() == 'pressure':
-                vwrf = f['P'][:][0,:,lat_inds,lon_inds] + f['PB'][:][0,:,lat_inds,lon_inds]
+                vwrf_smp = f['P'][:][0,:,lat_inds,lon_inds] + f['PB'][:][0,:,lat_inds,lon_inds]
+            elif v.lower() == 'psfc':
+                vwrf_smp = f['PSFC'][:][0,lat_inds,lon_inds]
+                vert_interp = False
             else:
                 try:
-                    vwrf = f[v][:][0,:,lat_inds,lon_inds]
+                    vwrf = f[v][0]
                 except KeyError:
                     print(f"{v} not defined")
                     continue
-            if interp:
-                for i in time_inds:
-                    intpf = interp(wrf_z,vwrf)
-                    var_dict[v][i] = intpf(interp_levs)
+                if len(vwrf.shape) == 2:
+                    vwrf_smp = vwrf[lat_inds,lon_inds]
+                    vert_interp = False
+                    for i,ind in enumerate(time_inds):
+                        var_dict[v][ind,0] = vwrf_smp[i]
+                    continue
+                else:
+                    vwrf_smp = vwrf[:,lat_inds,lon_inds]
+            if vert_interp:
+                for i,ind in enumerate(time_inds):
+                    intpf = interp1d(wrf_z[:-1,i]-wrf_zsurf[i],vwrf_smp[i])
+                    var_dict[v][ind] = intpf(interp_levs)
             else:
-                for i in time_inds:
-                    var_dict[v][i] = vwrf[i]
+                for i,ind in enumerate(time_inds):
+                    var_dict[v][ind] = vwrf_smp[i]
 
     return var_dict
 
