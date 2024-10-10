@@ -8,7 +8,7 @@ Functions
 ---------
 
 `locate_trajectory_boundary_points(traj_fname='', save_dir='', bbox=[], write_files=False)`
-:   Description:        Finds the place in an RDS file called traj_fname from STILT that a particle leaves a 
+    Description:        Finds the place in an RDS file called traj_fname from STILT that a particle leaves a 
                         bounding box `bbox`
     Inputs:
         traj_fname      Filename of RDS file from STILT that gives the particle information
@@ -21,7 +21,7 @@ Functions
         bnd             Dict (keys): x, y, z, t of intersection, observation time (obs_t)
 
 `run_function_in_parallel(fun, args_list)`
-:   Description:       Generic function that runs any function over a set of CPUs -
+    Description:       Generic function that runs any function over a set of CPUs -
                        note that this uses concurrent.futures.PoolProcessExecutor due
                        to multithreading issues with rpy2
     Inputs:
@@ -30,7 +30,7 @@ Functions
                        argument names for the function fun
 
 `sample_wrfout_met_profile(wrf_domain='d01', wrf_path='', var_dict={})`
-:   Description:        This function finds the wrfout files closest in time to a sample and
+    Description:        This function finds the wrfout files closest in time to a sample and
                         then locates the gridbox closest to the sample location from which it 
                         pulls the variables of interest.
     
@@ -45,7 +45,7 @@ Functions
         var_dict        Augmented dictionary with variables from the wrfout file of interest on levels
 
 `sample_wrfout_single_receptor(wrf_domain='d01', boundary_filename='', overwrite=False)`
-:   Description:            Finds the wrfout file with the location/time of a particle and 
+    Description:            Finds the wrfout file with the location/time of a particle and 
                             extracts its CO2 and CH4 at the nearest model level with KDTree
                             and writes the information to a file.
     Inputs:
