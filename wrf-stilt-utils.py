@@ -3,7 +3,7 @@
 # wrf-stilt-utils.py 
 #========================
 """
-
+import warnings
 from h5py import File
 import netCDF4 as nc
 import glob,sys,os,pdb,concurrent.futures,time
@@ -13,8 +13,10 @@ from scipy.interpolate import interp1d
 from pykdtree.kdtree import KDTree
 import rpy2.robjects as ro
 from rpy2.robjects import conversion,default_converter
+from turfpy.measurement import boolean_point_in_polygon
+from geojson import Point, MultiPolygon, Feature
 
-def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
+def sample_wrfout_profile(wrf_domain='d01',wrf_path='',var_dict={}):
     """
     Description:        This function finds the wrfout files closest in time to a sample and
                         then locates the gridbox closest to the sample location from which it 
@@ -33,9 +35,9 @@ def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
     files = sorted(glob.glob(f'{wrf_path}/*{wrf_domain}*'))
     wrfdatetime = [dt.datetime.strptime(fi.split(f'{wrf_domain}_')[-1],'%Y-%m-%d_%H:%M:%S') for fi in files]
     try:
-        sample_lat = np.array(var_dict['lat'][:])
-        sample_lon = np.array(var_dict['lon'][:])
-        sample_dt = np.array(var_dict['datetime'][:])
+        sample_lat = np.array(var_dict['lat'])
+        sample_lon = np.array(var_dict['lon'])
+        sample_dt = np.array(var_dict['datetime'])
     except KeyError:
         print("var_dict must contain at least one longitude, latitude, and datetime")
         return var_dict
@@ -77,9 +79,9 @@ def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
             if 'levs' in var_dict.keys(): vert_interp = True
             if v in ['lat','lon','datetime','levs']: continue
             if v.lower() == 'pressure':
-                vwrf_smp = f['P'][:][0,:,lat_inds,lon_inds] + f['PB'][:][0,:,lat_inds,lon_inds]
+                vwrf_smp = (f['P'][:][0]+f['PB'][:][0])[:,lat_inds,lon_inds]
             elif v.lower() == 'psfc':
-                vwrf_smp = f['PSFC'][:][0,lat_inds,lon_inds]
+                vwrf_smp = f['PSFC'][:][0][lat_inds,lon_inds]
                 vert_interp = False
             else:
                 try:
@@ -97,7 +99,7 @@ def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
                     vwrf_smp = vwrf[:,lat_inds,lon_inds]
             if vert_interp:
                 for i,ind in enumerate(time_inds):
-                    intpf = interp1d(wrf_z[:-1,i]-wrf_zsurf[i],vwrf_smp[i])
+                    intpf = interp1d((wrf_z[:-1,i]-wrf_zsurf[i]).data,vwrf_smp[:,i].data)
                     var_dict[v][ind] = intpf(interp_levs)
             else:
                 for i,ind in enumerate(time_inds):
@@ -105,7 +107,7 @@ def sample_wrfout_met_profile(wrf_domain='d01',wrf_path='',var_dict={}):
 
     return var_dict
 
-def sample_wrfout_point_ghg(wrf_domain='d01',wrf_path='',boundary_filename='',overwrite=False):
+def stilt_boundary_wrfout_sampler(ID='',wrf_domain='d01',wrf_path='',bnd_loc_vars={},receptor_loc_vars={},save_dir='./',overwrite=False):
     """
     Description:            Finds the wrfout file with the location/time of a particle and 
                             extracts its CO2 and CH4 at the nearest model level with KDTree
@@ -113,29 +115,26 @@ def sample_wrfout_point_ghg(wrf_domain='d01',wrf_path='',boundary_filename='',ov
     Inputs:
         wrf_domain:         wrfout domain - "d01"
         wrf_path:           directory where wrfout files are stored
-        boundary_filename:  the boundary point file name - contains the location and time
-                            where each particle hit the boundary
+        var_dict:           dictionary containing the space/time coordinates of boundary as 
+                            well as any receptor info (e.g, pressure) that needs to be returned
         overwrite           True means that any existing files are overwitten
     Returns:
         bc                  dictionary containing the boundary co2 and ch4 from wrf as well
                             as the wrf lat,lon,z closest to the sample
     """
-    wrf_bnd_fname = boundary_filename.split('.h5')[0]+'_wrf'+wrf_domain+'.h5'
-    if os.path.exists(wrf_bnd_fname):
+    wrf_bnd_fname = ID+'_wrf'+wrf_domain+'.h5'
+    os.makedirs(save_dir,exist_ok=True)
+    if os.path.exists(save_dir+wrf_bnd_fname):
         if overwrite==True:
-            os.remove(wrf_bnd_fname)
+            os.remove(save_dir+wrf_bnd_fname)
         else:
             print('Boundary GHG file already exists, skipping.')
             return
-
-    with File(boundary_filename,'r') as loc_f:
-        alt = loc_f['particle_altitude'][:]
-        lon = loc_f['particle_longitude'][:]
-        lat = loc_f['particle_latitude'][:]
-        t = loc_f['particle_time'][:]
-        obs_t = (dt.datetime.strptime(loc_f.attrs['obs_time'][:], \
-                '%Y-%m-%d %H:%M:%S UTC')-dt.datetime(1970,1,1)).total_seconds()
-        loc_f.close()
+    alt = bnd_loc_vars['bnd_zagl'][:]
+    lat = bnd_loc_vars['bnd_lat'][:]
+    lon = bnd_loc_vars['bnd_lon'][:]
+    t = bnd_loc_vars['bnd_t'][:]
+    obs_t = receptor_loc_vars['datetime']#dt.datetime(1970,1,1) + dt.timedelta(seconds=int(receptor_loc_vars['obs_t']))
 
     #==================================================
     #wrfout_prefix = '/work2/07655/tg869546/stampede3/nyc-chem/2023/wrfout/'
@@ -197,21 +196,38 @@ def sample_wrfout_point_ghg(wrf_domain='d01',wrf_path='',boundary_filename='',ov
     bc['part_lon'] = lon[:]
     bc['part_z'] = alt[:]
     bc['part_t'] = t[:]
-    with File(wrf_bnd_fname,'w') as loc_f:
-        loc_f.create_dataset('part_lat',data=lat[:])
-        loc_f.create_dataset('part_lon',data=lon[:])
-        loc_f.create_dataset('part_z',data=alt[:])
-        loc_f.create_dataset('part_t',data=t[:])
-        loc_f.create_dataset('wrf_lat',data=bc['lat'][:])
-        loc_f.create_dataset('wrf_lon',data=bc['lon'][:])
-        loc_f.create_dataset('wrf_z',data=bc['z'][:])
-        loc_f['wrf_time'] = bc['t'][:]
-        loc_f.create_dataset('wrf_co2',data=bc['co2'][:])
-        loc_f.create_dataset('wrf_ch4',data=bc['ch4'][:])
+
+    # Get the met variables (or whatever) from the wrfout files at the receptor location and time
+    if len(receptor_loc_vars.keys()) > 0:
+        receptor_loc_vars = sample_wrfout_profile(wrf_domain=wrf_domain,wrf_path=wrf_path,var_dict=receptor_loc_vars)
+    bc['receptor_loc_vars'] = receptor_loc_vars
+
+    with File(save_dir+wrf_bnd_fname,'w') as loc_f:
+        g = loc_f.create_group('boundary')
+        g.create_dataset('part_lat',data=lat[:])
+        g.create_dataset('part_lon',data=lon[:])
+        g.create_dataset('part_z',data=alt[:])
+        g.create_dataset('part_t',data=t[:])
+        g.create_dataset('wrf_bc_lat',data=bc['lat'][:])
+        g.create_dataset('wrf_bc_lon',data=bc['lon'][:])
+        g.create_dataset('wrf_bc_z',data=bc['z'][:])
+        g['wrf_bc_time'] = bc['t'][:]
+        g.create_dataset('wrf_bc_co2',data=bc['co2'][:])
+        g.create_dataset('wrf_bc_ch4',data=bc['ch4'][:])
+
+        g = loc_f.create_group('receptor')
+        for v in list(receptor_loc_vars.keys()):
+            if v == 'datetime':
+                out_v = []
+                for d in receptor_loc_vars['datetime']:
+                    out_v.append((d-dt.datetime(1970,1,1)).total_seconds())
+                g.create_dataset('time',data=out_v)
+            else:
+                g.create_dataset(v,data=receptor_loc_vars[v])
         loc_f.close()
     return bc
 
-def locate_trajectory_boundary_points(traj_fname='',save_dir='',bbox=[],write_files=False):
+def locate_trajectory_boundary_points(ID='',trajectory_rds_filename='',save_dir='',bbox=None,write_files=False):
     """
     Description:        Finds the place in an RDS file called traj_fname from STILT that a particle leaves a 
                         bounding box `bbox`
@@ -225,12 +241,12 @@ def locate_trajectory_boundary_points(traj_fname='',save_dir='',bbox=[],write_fi
         part            Dict (keys): time (t), particle ID (ind), latitude (lat), longitude (lon), and altitude (zagl)
         bnd             Dict (keys): x, y, z, t of intersection, observation time (obs_t)
     """
-    lon_lb,lon_ub,lat_lb,lat_ub = bbox[:]
-
+    #lon_lb,lon_ub,lat_lb,lat_ub = bbox[:]
+    
     with conversion.localconverter(default_converter):
 #Trajectories are saved as RDS File
         readRDS = ro.r['readRDS']
-        rdf = readRDS(traj_fname)
+        rdf = readRDS(trajectory_rds_filename)
 #----
 # Particle information
         part = {}
@@ -247,8 +263,14 @@ def locate_trajectory_boundary_points(traj_fname='',save_dir='',bbox=[],write_fi
     bnd_inds = []                           # index where particles first hit the boundary of the bbox
     for i in range(1,n_traj+1):
         pt_inds = np.where(part['ind'] == i)[0]
-        bind = np.where((part['lon'][pt_inds] >= lon_lb)*(part['lon'][pt_inds] <= lon_ub)*(part['lat'][pt_inds] <= lat_ub)*(part['lat'][pt_inds] >= lat_lb))[0]
-        if len(np.where(np.diff(bind) > 1)[0]) == 0:
+        points = [Feature(geometry=Point([part['lat'][ind],part['lon'][ind]])) for ind in pt_inds]
+        polygons = [bbox for j in range(len(pt_inds))]
+        #bind = np.where((part['lon'][pt_inds] >= lon_lb)*(part['lon'][pt_inds] <= lon_ub)*(part['lat'][pt_inds] <= lat_ub)*(part['lat'][pt_inds] >= lat_lb))[0]
+        bind = np.where(list(map(boolean_point_in_polygon,points,polygons)))[0]
+        first_pt_check = boolean_point_in_polygon(points[0],polygons[0])
+        if (len(bind) == 0) or (first_pt_check == False):
+            bd = 0
+        elif len(np.where(np.diff(bind) > 1)[0]) == 0:
             bd = bind[-1]
         else:
             bd = bind[np.where(np.diff(bind) > 1)][0]
@@ -260,7 +282,7 @@ def locate_trajectory_boundary_points(traj_fname='',save_dir='',bbox=[],write_fi
 
     rec['last_ind'] = []
     for i in range(n_traj):
-        pt_inds = np.where (part['ind'] == i+1)[0]
+        pt_inds = np.where(part['ind'] == i+1)[0]
         for ky in ['lat','lon','zagl','ind','t']:
             if len(part[ky]) == 0: continue
             rec[ky][i,:bnd_inds[i]] = part[ky][pt_inds][:bnd_inds[i]]
@@ -268,50 +290,83 @@ def locate_trajectory_boundary_points(traj_fname='',save_dir='',bbox=[],write_fi
 #----
 
 #----
-# Write out boundary points - take the mean of the last 5 points to reduce noise
+# Locate boundary points - take the mean of the last 5 points to reduce noise
     inds = rec['last_ind'][:]
     bnd = {}
-    bnd['x'] = np.array([rec['lon'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
-    bnd['y'] = np.array([rec['lat'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
-    bnd['z'] = np.array([rec['zagl'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
+    bnd['bnd_lon'] = np.array([rec['lon'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
+    bnd['bnd_lat'] = np.array([rec['lat'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
+    bnd['bnd_zagl'] = np.array([rec['zagl'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)])
     bnd['t'] = np.array([rec['t'][i,inds[i]-5:inds[i]].mean() for i in range(n_traj)]) #time in seconds since release
-    bnd['obs_t'] = rdf[1][0][0] #(dt.datetime(1970,1,1) + dt.timedelta(seconds=rdf[1][0][0])).strftime('%Y-%    m-%d %H:%M:%S UTC')
-    bnd['part_t'] = bnd['obs_t'] + bnd['t'] # Seconds since 1970,1,1
+    bnd['bnd_t'] = rdf[1][0][0] + bnd['t'] # Seconds since 1970,1,1
+    return_dict = {}
+    return_dict['bnd_loc_vars'] = bnd
+    return_dict['receptor_loc_vars'] = {'lat':[float(rdf[1][1][0])],'lon':[float(rdf[1][2][0])],
+            'datetime':[dt.datetime(1970,1,1) + dt.timedelta(seconds=rdf[1][0][0])],
+            'levs':[float(rdf[1][3][0])]}
+#----
 
+#----
+# Write out trajectories to HDF5 files if write_files==True
     if write_files:
-        save_fname = save_dir+traj_fname.split('/')[-1].split('.rds')[0]+'_bnd.h5'
+        os.makedirs(save_dir,exist_ok=True)
+        save_fname = save_dir+trajectory_rds_filename.split('/')[-1].split('.rds')[0]+'.h5'
+        if os.path.exists(save_fname):
+            os.remove(save_fname)
         f_out = File(save_fname,'w')
         f_out.attrs['obs_time'] = (dt.datetime(1970,1,1) + dt.timedelta(seconds=rdf[1][0][0])).strftime('%Y-%m-%d %H:%M:%S UTC')
-        f_out.create_dataset('particle_time',data=bnd['part_t'][:])
-        f_out['particle_time'].attrs['units'] = 'Seconds since 1/1/1970'
-        f_out.create_dataset('particle_latitude',data=bnd['y'][:])
-        f_out.create_dataset('particle_longitude',data=bnd['x'][:])
-        f_out.create_dataset('particle_altitude',data=bnd['z'][:])
+        f_out.attrs['obs_lat'] = float(rdf[1][1][0])
+        f_out.attrs['obs_lon'] = float(rdf[1][2][0])
+        f_out.attrs['obs_alt'] = float(rdf[1][3][0])
+        f_out.create_dataset('particle_time',data=rec['t'][:])
+        f_out['particle_time'].attrs['units'] = 'Seconds since release'
+        f_out.create_dataset('particle_latitude',data=rec['lat'][:])
+        f_out.create_dataset('particle_longitude',data=rec['lon'][:])
+        f_out.create_dataset('particle_altitude',data=rec['zagl'][:])
+        f_out.create_dataset('boundary_index',data=rec['last_ind'][:])
         f_out.close()
 #----
-    return part,bnd
+    return return_dict
 
 def run_function_in_parallel(fun,args_list):
     """
-    Description:       Generic function that runs any function over a set of CPUs -
-                       note that this uses concurrent.futures.PoolProcessExecutor due
-                       to multithreading issues with rpy2
+    Description:        Generic function that runs any function over a set of CPUs -
+                        note that this uses concurrent.futures.PoolProcessExecutor due
+                        to multithreading issues with rpy2
     Inputs:
-        fun            Python function
-        args_list      List of dictionaries with keys set to match the input variable
-                       argument names for the function fun
+        fun             Python function
+        args_list       List of dictionaries with keys set to match the input variable
+                        argument names for the function fun. Note: each dictionary must have
+                        a key called ID with unique value to be identifiable in the results dictionary.
+    Returns:
+        results_dict    Concatenated results of the function from collection of args_list
+                        indexed by the ID key in the args_list list of dictionaries. Each entry
+                        has a "result" entry that is the return value of the function, a "warnings" 
+                        entry, and if the function does not conclude successfully, an error entry 
+                        consisting of the Exception.
     """
+    result_dict = {}
     with concurrent.futures.ProcessPoolExecutor() as executor:
         # Submit tasks to be executed in parallel with named arguments
         future_to_args = {executor.submit(fun, **args): args for args in args_list}
 
         # Gather results as they complete
         for future in concurrent.futures.as_completed(future_to_args):
-            args = future_to_args[future]
+            args_future = future_to_args[future]
             try:
-                result = future.result()
-                print(f"Function with args {args} finished successfully!")
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    result = future.result()
+                    result_dict[args_future['ID']] = {
+                            "result": result,
+                            "warnings": [str(warn.message) for warn in w],
+                            "error": None
+                            }
+                print(f"Function with arg ID {args_future['ID']} finished successfully!")
             except Exception as exc:
-                print(f"Function with args {args} generated an exception: {exc}")
-
-
+                print(f"Function with arg ID {args_future['ID']} generated an exception: {exc}")
+                result_dict[args_future['ID']] = {
+                            "result": None,
+                            "warnings": [],
+                            "error": f"Generated an exception: {exc}"
+                            }
+    return result_dict
