@@ -94,7 +94,8 @@ def locate_trajectory_boundary_points(ID='',trajectory_rds_filename='',save_dir=
     bnd['bnd_lon'] = np.array([rec['lon'][i,inds[i]] for i in range(n_traj)])
     bnd['bnd_lat'] = np.array([rec['lat'][i,inds[i]] for i in range(n_traj)])
     bnd['bnd_zagl'] = np.array([rec['zagl'][i,inds[i]] for i in range(n_traj)])
-    bnd['bnd_t'] = rdf[1][0][0] + bnd['t'] # Seconds since 1970,1,1
+    t_s = np.array([rec['t'][i,inds[i]] for i in range(n_traj)])
+    bnd['bnd_t'] = rdf[1][0][0] + t_s # Seconds since 1970,1,1
     return_dict['bnd_loc_vars'] = bnd
 #----
 
@@ -293,7 +294,7 @@ def stilt_boundary_wrfout_sampler(ID='',wrf_domain='d01',wrf_path='',trajectory_
         else:
             print('Boundary GHG file already exists, skipping.')
             return
-        
+
     alt = bnd_loc_vars['bnd_zagl'][:]
     lat = bnd_loc_vars['bnd_lat'][:]
     lon = bnd_loc_vars['bnd_lon'][:]
@@ -400,8 +401,30 @@ def stilt_boundary_wrfout_sampler(ID='',wrf_domain='d01',wrf_path='',trajectory_
             else:
                 g.create_dataset(v,data=receptor_loc_vars[v])
         loc_f.close()
-    
     return bnd_save_dir+wrf_bnd_fname
+
+def compile_bnd_files(ID=None,wrf_domain='d01',profile_vars={},point_vars={},save_dir='./'):
+    """
+     ID 20230726_F1_05757
+     vector vars are vectors like pressure, temp, water vapor, co2, ch4
+     point vars are numbers like psfc, xco2, xch4, latitude, longitude, time
+    """
+
+    ob = ID.split('_')[-1]
+    ob_files = sorted(glob.glob(f'{save_dir}/{ob:05d}/*{wrf_domain}.h5'))
+    levs = sorted([fi.split('_')[3] for fi in ob_files])
+
+    for v in list(boundary_vars.keys()):
+        profile_vars[v]['values'] = np.zeros(len(levs))
+    for iz,z in enumerate(levs):
+        ind = np.where([fi.split('_')[3] == z for fi in ob_files])[0]
+        f = File(ob_files[ind])
+        for v in list(profile_vars.keys()):
+            profile_vars[v][iz] = f[profile_vars[v]['bnd_group']][v]
+    for v in list(point_vars.keys()):
+        point_vars[v] = f[point_vars[v]['bnd_group']][v]
+
+    return point_vars,profile_vars
 
 def run_function_in_parallel(fun,args_list):
     """
