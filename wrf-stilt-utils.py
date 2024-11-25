@@ -210,8 +210,10 @@ def sample_wrfout_profile(wrf_domain='d01',wrf_path='',var_dict={}):
                     vwrf_smp = vwrf[:,lat_inds,lon_inds]
             if vert_interp:
                 for i,ind in enumerate(time_inds):
+                    vert_inds = np.where((interp_levs >= wrf_z[0,i])*(interp_levs <= wrf_z[-1,i]))[0]
+                    var_dict[v][ind] = np.nan*np.zeros(len(interp_levs))
                     intpf = interp1d((wrf_z[:-1,i]-wrf_zsurf[i]).data,vwrf_smp[:,i].data)
-                    var_dict[v][ind] = intpf(interp_levs)
+                    var_dict[v][ind][vert_inds] = intpf(interp_levs[vert_inds])
             else:
                 for i,ind in enumerate(time_inds):
                     var_dict[v][ind] = vwrf_smp[i]
