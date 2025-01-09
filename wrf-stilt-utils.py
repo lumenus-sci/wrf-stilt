@@ -160,7 +160,7 @@ def sample_wrfout_profile(wrf_domain='d01',wrf_path='',var_dict={}):
     for v in var_dict:
         if v in ['lat','lon','datetime','levs']: continue
         if 'levs' in var_dict.keys():
-            interp_levs = var_dict['levs']
+            interp_levs = np.array(var_dict['levs'])
             n_levs = len(interp_levs)
         else:
             n_levs = f['P'][:].shape[1]
