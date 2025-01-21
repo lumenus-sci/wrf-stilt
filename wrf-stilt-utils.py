@@ -180,8 +180,8 @@ def sample_wrfout_profile(wrf_domain='d01',wrf_path='',var_dict={}):
         dd,ii = tree.query(part_points,k=1,eps=0.0)
         lat_inds,lon_inds = np.unravel_index(ii,wrf_lat.shape,order='C')
         wrf_gph = (f['PH'][:] + f['PHB'][:])[0][:,lat_inds,lon_inds]
-        wrf_z = wrf_gph/9.8
         wrf_zsurf = f['HGT'][:][0,lat_inds,lon_inds]
+        wrf_z = wrf_gph/9.8 - wrf_zsurf
 
         # Sample the model at the lat/lon and vertical levels for each variable
         # If a variable name string is not in the wrfout file, a new elif statement
